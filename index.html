@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Take a selfie</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100svh; padding: 32px 16px; background: #f3f5f2; color: #18312b; font-family: system-ui, sans-serif; }
+    main { width: min(100%, 620px); margin: auto; padding: clamp(20px, 5vw, 36px); background: white; border: 1px solid #dce5de; border-radius: 24px; box-shadow: 0 16px 50px #18312b0a; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 6vw, 38px); letter-spacing: -.04em; }
+    p { line-height: 1.6; }
+    .intro { margin: 0 0 24px; color: #51665e; }
+    .capture-layout, .controls { min-width: 0; }
+    .camera { position: relative; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 16px; background: #15251f; }
+    video, .camera img { display: block; width: 100%; height: 100%; object-fit: contain; }
+    video { transform: scaleX(-1); }
+    [hidden] { display: none !important; }
+    .placeholder { position: absolute; inset: 0; display: grid; place-content: center; padding: 24px; text-align: center; color: #d9e6df; }
+    label { display: block; margin: 24px 0 8px; font-weight: 650; }
+    input { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid #94a69c; border-radius: 10px; font: inherit; }
+    input[aria-invalid="true"] { border-color: #b32424; }
+    .hint { color: #51665e; font-size: 14px; margin: 8px 0 20px; overflow-wrap: anywhere; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { flex: 1; min-height: 48px; padding: 12px 16px; border: 1px solid #245e49; border-radius: 10px; background: #245e49; color: white; font: inherit; font-weight: 650; cursor: pointer; }
+    button.secondary { background: white; color: #245e49; }
+    button:hover:enabled { background: #194634; color: white; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    :focus-visible { outline: 3px solid #c07a21; outline-offset: 3px; }
+    #status { min-height: 3.2em; margin: 18px 0 0; font-size: 14px; }
+    #status.error { color: #a22222; }
+    footer { border-top: 1px solid #e4eae5; padding-top: 16px; margin-top: 14px; font-size: 13px; color: #51665e; line-height: 1.6; }
+    @media (orientation: landscape) {
+      main { width: min(100%, 1100px); }
+      .capture-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: clamp(16px, 3vw, 32px); align-items: start; }
+      .controls > label:first-child { margin-top: 0; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Take a selfie.</h1>
+    <p class="intro">Get comfortable, add your initials, and capture a photo.</p>
+    <div class="capture-layout">
+      <div class="camera">
+        <video id="preview" autoplay muted playsinline hidden aria-label="Live webcam preview"></video>
+        <img id="photo" alt="Your captured selfie" hidden>
+        <div id="placeholder" class="placeholder">Your camera preview will appear here.</div>
+      </div>
+      <div class="controls">
+        <label for="initials">Your initials</label>
+        <input id="initials" type="text" placeholder="e.g. AB" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-describedby="filename">
+        <label for="real-name">Real Name (optional)</label>
+        <input id="real-name" type="text" placeholder="e.g. Jane Doe" maxlength="80" autocomplete="off" autocapitalize="words" spellcheck="false" aria-describedby="filename">
+        <p id="filename" class="hint">Enter letters or numbers to name your photo.</p>
+        <div class="buttons">
+          <button id="start" type="button">Start camera</button>
+          <button id="capture" type="button" hidden disabled>Take photo</button>
+          <button id="retake" class="secondary" type="button" hidden>Retake</button>
+          <button id="save" type="button" hidden disabled>Save photo</button>
+          <button id="new-photo" class="secondary" type="button" hidden>New photo</button>
+        </div>
+        <p id="status" role="status" aria-live="polite">Start the camera and allow access when your browser asks.</p>
+      </div>
+    </div>
+    <footer>Your photo stays in this browser until you save it to your device. Nothing is uploaded. The saved photo matches the mirrored preview. The camera stays on for your next photo until you leave or close this page.</footer>
+  </main>
+  <script>
+    'use strict';
+    const preview = document.querySelector('#preview');
+    const photo = document.querySelector('#photo');
+    const placeholder = document.querySelector('#placeholder');
+    const initials = document.querySelector('#initials');
+    const realName = document.querySelector('#real-name');
+    const filename = document.querySelector('#filename');
+    const start = document.querySelector('#start');
+    const capture = document.querySelector('#capture');
+    const retake = document.querySelector('#retake');
+    const save = document.querySelector('#save');
+    const newPhoto = document.querySelector('#new-photo');
+    const status = document.querySelector('#status');
+    let stream = null;
+    let photoUrl = null;
+    let busy = false;
+
+    function message(text, error = false) {
+      status.textContent = text;
+      status.classList.toggle('error', error);
+    }
+
+    function validInitials() {
+      return /^[A-Z0-9]{1,12}$/.test(initials.value.trim());
+    }
+
+    function photoFilename() {
+      const name = realName.value.normalize('NFC').trim()
+        .replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+      return `${initials.value.trim().toUpperCase()}${name ? `-${name}` : ''}.jpg`;
+    }
+
+    function updateFilename() {
+      const uppercase = initials.value.toUpperCase();
+      if (initials.value !== uppercase) {
+        const { selectionStart, selectionEnd } = initials;
+        initials.value = uppercase;
+        initials.setSelectionRange(selectionStart, selectionEnd);
+      }
+      const value = initials.value.trim();
+      const valid = validInitials();
+      initials.setAttribute('aria-invalid', String(value.length > 0 && !valid));
+      filename.textContent = valid ? `Save as ${photoFilename()}` : 'Enter 1–12 letters or numbers, without spaces or punctuation.';
+      save.disabled = !photoUrl || !valid;
+    }
+
+    function stopCamera() {
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      preview.srcObject = null;
+    }
+
+    function releasePhoto() {
+      photo.removeAttribute('src');
+      if (photoUrl) URL.revokeObjectURL(photoUrl);
+      photoUrl = null;
+    }
+
+    async function startCamera() {
+      if (busy) return;
+      busy = true;
+      start.disabled = true;
+      retake.disabled = true;
+      newPhoto.disabled = true;
+      capture.disabled = true;
+      message('Preparing camera…');
+      try {
+        if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+          throw new Error('Camera access requires HTTPS or localhost and a browser that supports webcams.');
+        }
+        if (!stream?.getVideoTracks().some(track => track.readyState === 'live')) {
+          stopCamera();
+          message('Waiting for camera access…');
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } }
+          });
+          preview.srcObject = stream;
+          stream.getVideoTracks()[0].addEventListener('ended', () => {
+            capture.disabled = true;
+            start.hidden = false;
+            message('Camera disconnected. Reconnect it and start the camera again.', true);
+          });
+        }
+        preview.hidden = false;
+        await preview.play();
+        releasePhoto();
+        photo.hidden = true;
+        placeholder.hidden = true;
+        start.hidden = true;
+        retake.hidden = true;
+        save.hidden = true;
+        newPhoto.hidden = true;
+        capture.hidden = false;
+        capture.disabled = preview.readyState < 2 || !preview.videoWidth;
+        message('Ready when you are. Look at the camera and take your photo.');
+      } catch (error) {
+        stopCamera();
+        preview.hidden = true;
+        placeholder.hidden = !photo.hidden;
+        start.hidden = false;
+        const errors = {
+          NotAllowedError: 'Camera access was denied. Allow camera access in your browser settings, then try again.',
+          NotFoundError: 'No camera was found. Connect a webcam and try again.',
+          NotReadableError: 'The camera could not be opened. Close other apps using it and try again.',
+          OverconstrainedError: 'Your camera could not use these settings. Try another browser or camera.'
+        };
+        message(errors[error.name] || error.message || 'Unable to start the camera. Please try again.', true);
+      } finally {
+        busy = false;
+        start.disabled = false;
+        retake.disabled = false;
+        newPhoto.disabled = false;
+        updateFilename();
+      }
+    }
+
+    preview.addEventListener('loadeddata', () => {
+      capture.disabled = !stream || !preview.videoWidth;
+    });
+    start.addEventListener('click', startCamera);
+    retake.addEventListener('click', startCamera);
+    newPhoto.addEventListener('click', async () => {
+      if (busy) return;
+      initials.value = '';
+      realName.value = '';
+      releasePhoto();
+      photo.hidden = true;
+      placeholder.hidden = false;
+      retake.hidden = true;
+      save.hidden = true;
+      newPhoto.hidden = true;
+      updateFilename();
+      await startCamera();
+      initials.focus();
+    });
+    initials.addEventListener('input', updateFilename);
+    realName.addEventListener('input', updateFilename);
+
+    capture.addEventListener('click', async () => {
+      if (busy || !stream || !preview.videoWidth || preview.readyState < 2) return;
+      busy = true;
+      capture.disabled = true;
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = preview.videoWidth;
+        canvas.height = preview.videoHeight;
+        const context = canvas.getContext('2d');
+        context.translate(canvas.width, 0);
+        context.scale(-1, 1);
+        context.drawImage(preview, 0, 0);
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .92));
+        if (!blob) throw new Error('The photo could not be captured. Please try again.');
+        releasePhoto();
+        photoUrl = URL.createObjectURL(blob);
+        photo.src = photoUrl;
+        photo.hidden = false;
+        preview.hidden = true;
+        capture.hidden = true;
+        retake.hidden = false;
+        save.hidden = false;
+        updateFilename();
+        message('Photo captured. Add your initials and save, or retake for another try.');
+        (validInitials() ? save : initials).focus();
+      } catch (error) {
+        message(error.message || 'Unable to capture a photo. Please try again.', true);
+      } finally {
+        busy = false;
+        capture.disabled = !stream;
+      }
+    });
+
+    save.addEventListener('click', () => {
+      if (!photoUrl || !validInitials()) return;
+      const name = photoFilename();
+      const link = document.createElement('a');
+      link.href = photoUrl;
+      link.download = name;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      newPhoto.hidden = false;
+      message(`Download requested: ${name}. Check your browser’s downloads or save prompt. Choose New photo when you’re ready for the next one.`);
+    });
+
+    window.addEventListener('pagehide', () => {
+      stopCamera();
+      releasePhoto();
+      photo.hidden = true;
+      preview.hidden = true;
+      placeholder.hidden = false;
+      start.hidden = false;
+      capture.hidden = true;
+      retake.hidden = true;
+      save.hidden = true;
+      newPhoto.hidden = true;
+      message('Start the camera to take a photo.');
+    });
+  </script>
+</body>
+</html>
